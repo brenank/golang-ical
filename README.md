@@ -1,7 +1,7 @@
 # golang-ical
 A  ICS / ICal parser and serialiser for Golang.
 
-[![GoDoc](https://godoc.org/github.com/arran4/golang-ical?status.svg)](https://godoc.org/github.com/arran4/golang-ical)
+[![GoDoc](https://godoc.org/github.com/brenank/golang-ical?status.svg)](https://godoc.org/github.com/brenank/golang-ical)
 
 Because the other libraries didn't quite do what I needed.
 

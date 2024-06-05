@@ -3,6 +3,7 @@ package ics
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/teambition/rrule-go"
 )
 
 type Component interface {
@@ -440,6 +443,101 @@ func (calendar *Calendar) Events() (r []*VEvent) {
 	return
 }
 
+func (calendar *Calendar) EventsWithRecurrence(until time.Time) ([]*VEvent, error) {
+	var r []*VEvent
+	for i := range calendar.Components {
+		switch event := calendar.Components[i].(type) {
+		case *VEvent:
+			recurrence := event.GetProperty(ComponentPropertyRrule)
+			if recurrence != nil {
+				duration, err := event.GetDuration()
+				if err != nil {
+					return nil, fmt.Errorf("failed to get duration: %w", err)
+				}
+
+				recurSet, err := toRruleSet(event)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get rruleSet: %w", err)
+				}
+
+				recurringStartTimes := recurSet.Between(recurSet.GetDTStart(), until, true)
+
+				//strip rrule logic
+				var props []IANAProperty
+				for _, prop := range event.Properties {
+					switch Property(prop.IANAToken) {
+					case PropertyRrule, PropertyRdate, PropertyExdate:
+						break
+					default:
+						props = append(props, prop)
+					}
+				}
+				event.Properties = props
+
+				//clone event
+				serialized, err := json.Marshal(event)
+				if err != nil {
+					return nil, fmt.Errorf("failed to serialize event: %w", err)
+				}
+				for i, start := range recurringStartTimes {
+					var newEvent VEvent
+					err := json.Unmarshal(serialized, &newEvent)
+					if err != nil {
+						return nil, fmt.Errorf("failed to deserialize event: %w", err)
+					}
+					newEvent.SetProperty(ComponentPropertyUniqueId, fmt.Sprintf("%s%d", newEvent.Id(), i))
+					newEvent.SetStartAt(start)
+					newEvent.SetEndAt(start.Add(duration))
+					r = append(r, &newEvent)
+				}
+			} else {
+				r = append(r, event)
+			}
+		}
+	}
+	return r, nil
+}
+
+func toRruleSet(event *VEvent) (*rrule.Set, error) {
+	set := rrule.Set{}
+
+	startAt, err := event.GetStartAt()
+	if err != nil {
+		return nil, fmt.Errorf("bad format")
+	}
+	defaultLoc := startAt.Location()
+	set.DTStart(startAt)
+
+	for _, prop := range event.Properties {
+		switch Property(prop.IANAToken) {
+		case PropertyRrule:
+			rOpt, err := rrule.StrToROptionInLocation(prop.Value, defaultLoc)
+			if err != nil {
+				return nil, fmt.Errorf("StrToROption failed: %v", err)
+			}
+			r, err := rrule.NewRRule(*rOpt)
+			if err != nil {
+				return nil, fmt.Errorf("NewRRule failed: %v", r)
+			}
+
+			set.RRule(r)
+		case PropertyRdate, PropertyExdate:
+			ts, err := rrule.StrToDatesInLoc(prop.Value, defaultLoc)
+			if err != nil {
+				return nil, fmt.Errorf("strToDates failed: %v", err)
+			}
+			for _, t := range ts {
+				if prop.IANAToken == string(PropertyRdate) {
+					set.RDate(t)
+				} else {
+					set.ExDate(t)
+				}
+			}
+		}
+	}
+	return &set, nil
+}
+
 func (event *VEvent) SetEndAt(t time.Time, props ...PropertyParameter) {
 	event.SetProperty(ComponentPropertyDtEnd, t.UTC().Format(icalTimestampFormatUtc), props...)
 }
@@ -458,6 +556,22 @@ func (event *VEvent) SetPriority(p int, props ...PropertyParameter) {
 
 func (event *VEvent) SetResources(r string, props ...PropertyParameter) {
 	event.setResources(r, props...)
+}
+
+// GetDuration gets the duration of an event.
+// This function will get the duration based off the end or start time of an event.
+// The returned duration is the length of an event based off the start and end time.
+//
+// Notice: It will not get the DURATION key of the ics - only computed from DTSTART and DTEND.
+func (event *VEvent) GetDuration() (time.Duration, error) {
+	startAt, err := event.GetStartAt()
+	if err == nil {
+		endAt, err := event.GetEndAt()
+		if err == nil {
+			return endAt.Sub(startAt), nil
+		}
+	}
+	return time.Duration(0), errors.New("start or end not yet defined")
 }
 
 // SetDuration updates the duration of an event.
